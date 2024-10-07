@@ -1,7 +1,1 @@
-,boston,Abalone,bank8FM,heat,cpuSm,energy,superconductivity
-RUS,6.85,9.456,11.673,10.458,9.94,12.983,10.705
-ROS,5.077,8.276,9.983,10.209,9.105,11.276,9.187
-SMOGN,3.817,189.563,35.68,251.871,185.718,2758.835,3951.75
-Distributed SMOGN (k_partitions = 2),16.439,28.336,16.951,17.738,17.556,60.497,35.988
-Distributed SMOGN (k_partitions = 4),15.526,21.896,13.32,12.48,11.985,29.373,26.844
-Distributed SMOGN (k_partitions = 8),15.563,12.725,10.012,9.437,8.643,21.45,18.789
+,sales
