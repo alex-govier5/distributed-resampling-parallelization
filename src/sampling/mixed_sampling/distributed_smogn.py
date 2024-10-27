@@ -141,12 +141,17 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
             dists = dist_matrix[base_sample_index]
             neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
 
+            effective_k = min(k, len(neighbour_sample_indices))
+
             for n_synth_sample in range(n_synth_samples):
-                neighbour_sample_index = np.random.choice(neighbour_sample_index_matrix[base_sample_index])
+                neighbour_sample_index = np.random.choice(neighbour_sample_indices)
                 neighbour_sample = partition.iloc[neighbour_sample_index]
 
                 dist = dists[neighbour_sample_index]
-                safe_dist = dists[neighbour_sample_indices[(k + 1) // 2]] / 2
+                if effective_k > 1:
+                    safe_dist = dists[neighbour_sample_indices[(effective_k + 1) // 2]] / 2
+                else:
+                    safe_dist = np.inf
 
                 if dist < safe_dist:
                     synth_sample = self._create_synth_sample_SMOTE(
