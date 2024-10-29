@@ -3,6 +3,7 @@ import pandas as pd
 from pyspark import keyword_only
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.feature import VectorAssembler
+import faiss
 from sklearn.metrics import euclidean_distances
 
 from src.params.sampling._smogn import _KMeansParams, _SMOGNParams
@@ -119,63 +120,152 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
 
         return {**synth_sample_cat_features, **synth_sample_num_features, **synth_sample_label}
 
-    def _create_synth_samples(self, partition, cat_feature_cols, num_feature_cols, label_col, n_synth_samples, k,
-                              perturbation):
-        n_rows = len(partition.index)
-        k = min(k, n_rows)
+    def _create_synth_samples(self, partition, cat_feature_cols, num_feature_cols, label_col, n_synth_samples, k, perturbation):
+        with open("debug_new.txt", "a") as debug_file:
+            
+            n_rows = len(partition.index)
+            k = min(k, n_rows)
+            debug_file.write(f"k: {k}\n")
+            debug_file.write(f"n_rows: {n_rows}\n")
+            feature_vectors = partition[[*num_feature_cols]].to_numpy().astype('float32')
+            index = faiss.IndexFlatL2(feature_vectors.shape[1])
+            index.add(feature_vectors)
+            distances, indices = index.search(feature_vectors, k + 1)
+            distances = distances[:, 1:]
+            neighbour_sample_index_matrix = indices[:, 1:]
+            debug_file.write(f"distances size: {distances.shape}, "
+                                        f"distances top 5 rows: {distances[:5]}\n")
+            debug_file.write(f"neighbour_sample_index_matrix size: {neighbour_sample_index_matrix.shape}, "
+                                        f"neighbour_sample_index_matrix top 5 rows: {neighbour_sample_index_matrix[:5]}\n")
 
-        feature_vectors = partition[[*num_feature_cols]].to_numpy()
-        dist_matrix = euclidean_distances(feature_vectors, feature_vectors)
-        neighbour_sample_index_matrix = np.delete(np.argsort(dist_matrix, axis=1), np.s_[k + 1:], axis=1)
+            cat_feature_probs = {
+                cat_feature_col: partition[cat_feature_col].value_counts(normalize=True).to_dict()
+                for cat_feature_col in cat_feature_cols
+            }
+            num_feature_stds = partition[[*num_feature_cols]].std()
+            label_std = partition[label_col].std()
 
-        cat_feature_probs = {
-            cat_feature_col: partition[cat_feature_col].value_counts(normalize=True).to_dict()
-            for cat_feature_col in cat_feature_cols
-        }
-        num_feature_stds = partition[[*num_feature_cols]].std()
-        label_std = partition[label_col].std()
+            synth_samples = [None for _ in range(n_rows * n_synth_samples)]
 
-        synth_samples = [None for _ in range(n_rows * n_synth_samples)]
+            for base_sample_index, base_sample in partition.iterrows():
+                debug_file.write(f"base_sample_index: {base_sample_index}\n")
+                dists = distances[base_sample_index]
+                debug_file.write(f"dists size: {len(dists)}, dists: {dists}\n")
+                neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
+                debug_file.write(f"neighbour_sample_indices size: {len(neighbour_sample_indices)}, "
+                                        f"neighbour_sample_indices: {neighbour_sample_indices}\n")
+                effective_k = min(k, len(neighbour_sample_indices))
+                debug_file.write(f"effective_k: {effective_k}\n")
 
-        for base_sample_index, base_sample in partition.iterrows():
-            dists = dist_matrix[base_sample_index]
-            neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
+                for n_synth_sample in range(n_synth_samples):
+                    neighbour_idx_in_dists = np.random.randint(effective_k)  
+                    neighbour_sample_index = neighbour_sample_indices[neighbour_idx_in_dists]  
+                    neighbour_sample = partition.iloc[neighbour_sample_index]
+                    debug_file.write(f"neighbour_idx_in_dists: {neighbour_idx_in_dists}\n\n")
+                    debug_file.write(f"neighbour_sample_index: {neighbour_sample_index}\n\n")
+                    debug_file.write(f"neighbour_sample: {neighbour_sample}\n\n")
 
-            effective_k = min(k, len(neighbour_sample_indices))
+                    dist = dists[neighbour_idx_in_dists]
+                    if effective_k > 1:
+                        safe_dist = dists[(effective_k + 1) // 2] / 2
+                    else:
+                        safe_dist = np.inf
 
-            for n_synth_sample in range(n_synth_samples):
-                neighbour_sample_index = np.random.choice(neighbour_sample_indices)
-                neighbour_sample = partition.iloc[neighbour_sample_index]
+                    if dist < safe_dist:
+                        synth_sample = self._create_synth_sample_SMOTE(
+                            base_sample=base_sample,
+                            neighbour_sample=neighbour_sample,
+                            cat_feature_cols=cat_feature_cols,
+                            num_feature_cols=num_feature_cols,
+                            label_col=label_col,
+                            base_sample_feature_vector=feature_vectors[base_sample_index],
+                            neighbour_sample_feature_vector=feature_vectors[neighbour_sample_index]
+                        )
 
-                dist = dists[neighbour_sample_index]
-                if effective_k > 1:
-                    safe_dist = dists[neighbour_sample_indices[(effective_k + 1) // 2]] / 2
-                else:
-                    safe_dist = np.inf
+                    else:
+                        synth_sample = self._create_synth_sample_GN(
+                            base_sample=base_sample,
+                            cat_feature_cols=cat_feature_cols,
+                            num_feature_cols=num_feature_cols,
+                            label_col=label_col,
+                            cat_feature_probs=cat_feature_probs,
+                            num_feature_stds=num_feature_stds,
+                            label_std=label_std,
+                            perturbation=min(safe_dist, perturbation)
+                        )
 
-                if dist < safe_dist:
-                    synth_sample = self._create_synth_sample_SMOTE(
-                        base_sample=base_sample,
-                        neighbour_sample=neighbour_sample,
-                        cat_feature_cols=cat_feature_cols,
-                        num_feature_cols=num_feature_cols,
-                        label_col=label_col,
-                        base_sample_feature_vector=feature_vectors[base_sample_index],
-                        neighbour_sample_feature_vector=feature_vectors[neighbour_sample_index]
-                    )
+                    synth_samples[base_sample_index * n_synth_samples + n_synth_sample] = synth_sample
 
-                else:
-                    synth_sample = self._create_synth_sample_GN(
-                        base_sample=base_sample,
-                        cat_feature_cols=cat_feature_cols,
-                        num_feature_cols=num_feature_cols,
-                        label_col=label_col,
-                        cat_feature_probs=cat_feature_probs,
-                        num_feature_stds=num_feature_stds,
-                        label_std=label_std,
-                        perturbation=min(safe_dist, perturbation)
-                    )
+            return synth_samples
 
-                synth_samples[base_sample_index * n_synth_samples + n_synth_sample] = synth_sample
+    # def _create_synth_samples(self, partition, cat_feature_cols, num_feature_cols, label_col, n_synth_samples, k,
+    #                           perturbation):
+    #     with open("debug.txt", "a") as debug_file:
+    #         n_rows = len(partition.index)
+    #         k = min(k, n_rows)
+    #         debug_file.write(f"k: {k}\n")
+    #         debug_file.write(f"n_rows: {n_rows}\n")
+    #         feature_vectors = partition[[*num_feature_cols]].to_numpy()
+    #         dist_matrix = euclidean_distances(feature_vectors, feature_vectors)
+    #         neighbour_sample_index_matrix = np.delete(np.argsort(dist_matrix, axis=1), np.s_[k + 1:], axis=1)
+    #         debug_file.write(f"dist_matrix size: {dist_matrix.shape}, "
+    #                       f"dist_matrix top 5 rows: {dist_matrix[:5]}\n")
+    #         debug_file.write(f"neighbour_sample_index_matrix size: {neighbour_sample_index_matrix.shape}, "
+    #                         f"neighbour_sample_index_matrix top 5 rows: {neighbour_sample_index_matrix[:5]}\n")
 
-        return synth_samples
+    #         cat_feature_probs = {
+    #             cat_feature_col: partition[cat_feature_col].value_counts(normalize=True).to_dict()
+    #             for cat_feature_col in cat_feature_cols
+    #         }
+    #         num_feature_stds = partition[[*num_feature_cols]].std()
+    #         label_std = partition[label_col].std()
+
+    #         synth_samples = [None for _ in range(n_rows * n_synth_samples)]
+
+    #         for base_sample_index, base_sample in partition.iterrows():
+    #             debug_file.write(f"base_sample_index: {base_sample_index}\n")
+    #             dists = dist_matrix[base_sample_index]
+    #             debug_file.write(f"dists size: {len(dists)}, dists: {dists}\n")
+    #             neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
+    #             debug_file.write(f"neighbour_sample_indices size: {len(neighbour_sample_indices)}, "
+    #                      f"neighbour_sample_indices: {neighbour_sample_indices}\n")
+    #             effective_k = min(k, len(neighbour_sample_indices))
+    #             debug_file.write(f"effective_k: {effective_k}\n")
+
+    #             for n_synth_sample in range(n_synth_samples):
+    #                 neighbour_sample_index = np.random.choice(neighbour_sample_index_matrix[base_sample_index])
+    #                 neighbour_sample = partition.iloc[neighbour_sample_index]
+    #                 debug_file.write(f"neighbour_sample_index: {neighbour_sample_index}\n\n")
+
+    #                 dist = dists[neighbour_sample_index]
+    #                 if effective_k > 1:
+    #                     safe_dist = dists[neighbour_sample_indices[(effective_k + 1) // 2]] / 2
+    #                 else:
+    #                     safe_dist = np.inf
+
+    #                 if dist < safe_dist:
+    #                     synth_sample = self._create_synth_sample_SMOTE(
+    #                         base_sample=base_sample,
+    #                         neighbour_sample=neighbour_sample,
+    #                         cat_feature_cols=cat_feature_cols,
+    #                         num_feature_cols=num_feature_cols,
+    #                         label_col=label_col,
+    #                         base_sample_feature_vector=feature_vectors[base_sample_index],
+    #                         neighbour_sample_feature_vector=feature_vectors[neighbour_sample_index]
+    #                     )
+
+    #                 else:
+    #                     synth_sample = self._create_synth_sample_GN(
+    #                         base_sample=base_sample,
+    #                         cat_feature_cols=cat_feature_cols,
+    #                         num_feature_cols=num_feature_cols,
+    #                         label_col=label_col,
+    #                         cat_feature_probs=cat_feature_probs,
+    #                         num_feature_stds=num_feature_stds,
+    #                         label_std=label_std,
+    #                         perturbation=min(safe_dist, perturbation)
+    #                     )
+
+    #                 synth_samples[base_sample_index * n_synth_samples + n_synth_sample] = synth_sample
+
+    #         return synth_samples
