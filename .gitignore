@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Big data
+data/raw
+data/processed
+
+# Profiling
+*.prof
+
 # Distribution / packaging
 .Python
 build/

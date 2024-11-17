@@ -1,1 +1,4 @@
-,sales
+,flights,power,sales
+Distributed SMOGN (k_partitions = 2),47.723,45.084,45.741
+Distributed SMOGN (k_partitions = 4),46.278,43.741,46.384
+Distributed SMOGN (k_partitions = 8),46.447,45.045,44.632
