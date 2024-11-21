@@ -7,8 +7,10 @@ __pycache__/
 *.so
 
 # Big data
-data/raw
-data/processed
+*sales*.csv
+*flights*.csv
+*power*.csv
+*power*.txt
 
 # Profiling
 *.prof

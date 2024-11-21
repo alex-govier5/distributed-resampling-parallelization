@@ -1,0 +1,8 @@
+,mae,rmse
+No Sampling,9.793,15.65
+RUS,27.161,33.384
+ROS,10.84,17.203
+SMOGN,11.836,17.299
+Distributed SMOGN (k_partitions = 2),11.09,16.484
+Distributed SMOGN (k_partitions = 4),11.223,16.24
+Distributed SMOGN (k_partitions = 8),11.465,17.064
