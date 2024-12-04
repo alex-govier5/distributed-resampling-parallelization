@@ -1,4 +1,3 @@
-,flights,power,sales
-Distributed SMOGN (k_partitions = 2),48.619,46.635,47.633
-Distributed SMOGN (k_partitions = 4),46.395,48.076,46.745
-Distributed SMOGN (k_partitions = 8),46.231,48.002,47.466
+Metric,superconductivity,sales,flights,power,boston,Abalone,bank8FM,heat,cpuSm,energy
+Partition Count,4.0,8.0,8.0,4.0,2.0,2.0,2.0,2.0,2.0,2.0
+Avg Execution Time (s),105.747,899.755,250.156,304.631,104.16,166.371,117.675,106.731,117.393,243.453

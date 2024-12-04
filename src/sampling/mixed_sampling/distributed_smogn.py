@@ -4,7 +4,9 @@ from pyspark import keyword_only
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.feature import VectorAssembler
 import faiss
+faiss.omp_set_num_threads(4)
 from sklearn.metrics import euclidean_distances
+from sklearn.cluster import MiniBatchKMeans
 
 from src.params.sampling._smogn import _KMeansParams, _SMOGNParams
 from src.sampling.mixed_sampling.base import BaseMixedSampler
@@ -31,11 +33,18 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
         feature_vector_col = "feature_vector"
         feature_vector_cols = get_num_cols(df)
 
+        # Assemble the feature vector
         df = VectorAssembler(inputCols=feature_vector_cols, outputCol=feature_vector_col).transform(df)
-        df = KMeans(featuresCol=feature_vector_col, predictionCol=partition_col, k=self.getKPartitions(),
-                    initSteps=self.getInitSteps(), tol=self.getTol(), maxIter=self.getMaxIter()).fit(df).transform(df)
 
-        df = df.drop(feature_vector_col)
+        # Convert the DataFrame to a NumPy array for use with MiniBatchKMeans
+        feature_vector_array = np.array(df.select(feature_vector_col).rdd.map(lambda row: row[0].toArray()).collect())
+
+        # Apply MiniBatchKMeans
+        kmeans = MiniBatchKMeans(n_clusters=self.getKPartitions(), batch_size=100, max_iter=self.getMaxIter(), tol=self.getTol())
+        cluster_labels = kmeans.fit_predict(feature_vector_array)
+
+        # Add the cluster labels to the DataFrame
+        df = df.withColumn(partition_col, pd.Series(cluster_labels))
 
         return df.repartition(self.getKPartitions(), partition_col)
 
@@ -123,9 +132,15 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
     def _create_synth_samples(self, partition, cat_feature_cols, num_feature_cols, label_col, n_synth_samples, k, perturbation):
         n_rows = len(partition.index)
         k = min(k, n_rows)
-        feature_vectors = partition[[*num_feature_cols]].to_numpy()
-        dist_matrix = euclidean_distances(feature_vectors, feature_vectors)
-        neighbour_sample_index_matrix = np.delete(np.argsort(dist_matrix, axis=1), np.s_[k + 1:], axis=1)
+        feature_vectors = partition[[*num_feature_cols]].to_numpy().astype('float32')
+        nlist = int(np.sqrt(n_rows))
+        quantizer = faiss.IndexFlatL2(feature_vectors.shape[1])
+        index = faiss.IndexIVFFlat(quantizer, feature_vectors.shape[1], nlist, faiss.METRIC_L2)
+        index.train(feature_vectors)
+        index.add(feature_vectors)
+        distances, indices = index.search(feature_vectors, k + 1)
+        distances = distances[:, 1:]
+        neighbour_sample_index_matrix = indices[:, 1:]
 
         cat_feature_probs = {
             cat_feature_col: partition[cat_feature_col].value_counts(normalize=True).to_dict()
@@ -137,17 +152,18 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
         synth_samples = [None for _ in range(n_rows * n_synth_samples)]
 
         for base_sample_index, base_sample in partition.iterrows():
-            dists = dist_matrix[base_sample_index]
+            dists = distances[base_sample_index]
             neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
             effective_k = min(k, len(neighbour_sample_indices))
 
             for n_synth_sample in range(n_synth_samples):
-                neighbour_sample_index = np.random.choice(neighbour_sample_index_matrix[base_sample_index])
+                neighbour_idx_in_dists = np.random.randint(effective_k)  
+                neighbour_sample_index = neighbour_sample_indices[neighbour_idx_in_dists]  
                 neighbour_sample = partition.iloc[neighbour_sample_index]
 
-                dist = dists[neighbour_sample_index]
+                dist = dists[neighbour_idx_in_dists]
                 if effective_k > 1:
-                    safe_dist = dists[neighbour_sample_indices[(effective_k + 1) // 2]] / 2
+                    safe_dist = dists[(effective_k + 1) // 2] / 2
                 else:
                     safe_dist = np.inf
 
@@ -177,69 +193,3 @@ class DistributedSMOGN(BaseMixedSampler, _KMeansParams, _SMOGNParams):
                 synth_samples[base_sample_index * n_synth_samples + n_synth_sample] = synth_sample
 
         return synth_samples
-    
-    #NEW
-    # def _create_synth_samples(self, partition, cat_feature_cols, num_feature_cols, label_col, n_synth_samples, k, perturbation):
-    #     n_rows = len(partition.index)
-    #     k = min(k, n_rows)
-    #     feature_vectors = partition[[*num_feature_cols]].to_numpy().astype('float32')
-    #     nlist = int(np.sqrt(n_rows))
-    #     quantizer = faiss.IndexFlatL2(feature_vectors.shape[1])
-    #     index = faiss.IndexIVFFlat(quantizer, feature_vectors.shape[1], nlist, faiss.METRIC_L2)
-    #     index.train(feature_vectors)
-    #     index.add(feature_vectors)
-    #     distances, indices = index.search(feature_vectors, k + 1)
-    #     distances = distances[:, 1:]
-    #     neighbour_sample_index_matrix = indices[:, 1:]
-
-    #     cat_feature_probs = {
-    #         cat_feature_col: partition[cat_feature_col].value_counts(normalize=True).to_dict()
-    #         for cat_feature_col in cat_feature_cols
-    #     }
-    #     num_feature_stds = partition[[*num_feature_cols]].std()
-    #     label_std = partition[label_col].std()
-
-    #     synth_samples = [None for _ in range(n_rows * n_synth_samples)]
-
-    #     for base_sample_index, base_sample in partition.iterrows():
-    #         dists = distances[base_sample_index]
-    #         neighbour_sample_indices = neighbour_sample_index_matrix[base_sample_index]
-    #         effective_k = min(k, len(neighbour_sample_indices))
-
-    #         for n_synth_sample in range(n_synth_samples):
-    #             neighbour_idx_in_dists = np.random.randint(effective_k)  
-    #             neighbour_sample_index = neighbour_sample_indices[neighbour_idx_in_dists]  
-    #             neighbour_sample = partition.iloc[neighbour_sample_index]
-
-    #             dist = dists[neighbour_idx_in_dists]
-    #             if effective_k > 1:
-    #                 safe_dist = dists[(effective_k + 1) // 2] / 2
-    #             else:
-    #                 safe_dist = np.inf
-
-    #             if dist < safe_dist:
-    #                 synth_sample = self._create_synth_sample_SMOTE(
-    #                     base_sample=base_sample,
-    #                     neighbour_sample=neighbour_sample,
-    #                     cat_feature_cols=cat_feature_cols,
-    #                     num_feature_cols=num_feature_cols,
-    #                     label_col=label_col,
-    #                     base_sample_feature_vector=feature_vectors[base_sample_index],
-    #                     neighbour_sample_feature_vector=feature_vectors[neighbour_sample_index]
-    #                 )
-
-    #             else:
-    #                 synth_sample = self._create_synth_sample_GN(
-    #                     base_sample=base_sample,
-    #                     cat_feature_cols=cat_feature_cols,
-    #                     num_feature_cols=num_feature_cols,
-    #                     label_col=label_col,
-    #                     cat_feature_probs=cat_feature_probs,
-    #                     num_feature_stds=num_feature_stds,
-    #                     label_std=label_std,
-    #                     perturbation=min(safe_dist, perturbation)
-    #                 )
-
-    #             synth_samples[base_sample_index * n_synth_samples + n_synth_sample] = synth_sample
-
-    #     return synth_samples
